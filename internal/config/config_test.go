@@ -104,6 +104,15 @@ func TestLoadInvalidValues(t *testing.T) {
 		{"drain timeout above max", map[string]string{"WORKER_POOL_DRAIN_TIMEOUT_S": "999999"}, "WORKER_POOL_DRAIN_TIMEOUT_S"},
 		{"body bytes below min", map[string]string{"MAX_REQUEST_BODY_BYTES": "0"}, "MAX_REQUEST_BODY_BYTES"},
 		{"body bytes above max", map[string]string{"MAX_REQUEST_BODY_BYTES": "999999999"}, "MAX_REQUEST_BODY_BYTES"},
+		{"max source bytes below min", map[string]string{"MAX_SOURCE_SIZE_BYTES": "0"}, "MAX_SOURCE_SIZE_BYTES"},
+		{"max stdin bytes above max", map[string]string{"MAX_STDIN_SIZE_BYTES": "999999999"}, "MAX_STDIN_SIZE_BYTES"},
+		{"stdout capture below min", map[string]string{"STDOUT_CAPTURE_LIMIT_BYTES": "0"}, "STDOUT_CAPTURE_LIMIT_BYTES"},
+		{"stderr capture above max", map[string]string{"STDERR_CAPTURE_LIMIT_BYTES": "999999999"}, "STDERR_CAPTURE_LIMIT_BYTES"},
+		{"wall ceiling below min", map[string]string{"LANG_DEFAULT_WALL_TIME_S_MAX": "0"}, "LANG_DEFAULT_WALL_TIME_S_MAX"},
+		{"cpu ceiling above max", map[string]string{"LANG_DEFAULT_CPU_TIME_S_MAX": "9999"}, "LANG_DEFAULT_CPU_TIME_S_MAX"},
+		{"memory ceiling below floor", map[string]string{"LANG_DEFAULT_MEMORY_MB_MAX": "1"}, "LANG_DEFAULT_MEMORY_MB_MAX"},
+		{"process ceiling zero", map[string]string{"LANG_DEFAULT_PROCESS_COUNT_MAX": "0"}, "LANG_DEFAULT_PROCESS_COUNT_MAX"},
+		{"output ceiling above max", map[string]string{"LANG_DEFAULT_OUTPUT_SIZE_MB_MAX": "999"}, "LANG_DEFAULT_OUTPUT_SIZE_MB_MAX"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,5 +141,59 @@ func TestLoadDefaultLookup(t *testing.T) {
 	cfg, err := config.Load(nil)
 	if err != nil && cfg != nil {
 		t.Fatalf("Load(nil) returned error AND non-nil cfg: %v", err)
+	}
+}
+
+// TestCeilingsFor confirms the lookup helper exposes the resolved
+// ceilings. Phase 2 will extend with per-language overrides; Wave A
+// only needs the global default path.
+func TestCeilingsFor(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(envFrom(map[string]string{
+		"LANG_DEFAULT_WALL_TIME_S_MAX":    "30",
+		"LANG_DEFAULT_CPU_TIME_S_MAX":     "30",
+		"LANG_DEFAULT_MEMORY_MB_MAX":      "512",
+		"LANG_DEFAULT_PROCESS_COUNT_MAX":  "32",
+		"LANG_DEFAULT_OUTPUT_SIZE_MB_MAX": "8",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.CeilingsFor("py3")
+	want := config.ResourceCeilings{
+		WallTimeS: 30, CPUTimeS: 30, MemoryMB: 512, ProcessCount: 32, OutputSizeMB: 8,
+	}
+	if got != want {
+		t.Errorf("CeilingsFor = %+v, want %+v", got, want)
+	}
+	// Unknown language id falls back to the same defaults (Wave A behaviour).
+	if cfg.CeilingsFor("unknown") != want {
+		t.Errorf("unknown language did not fall back to defaults")
+	}
+}
+
+// TestLoadDefaultsForNewKeys asserts the architecture-spec defaults for
+// the size and per-language ceiling keys.
+func TestLoadDefaultsForNewKeys(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(envFrom(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxSourceSizeBytes != 1<<20 {
+		t.Errorf("MaxSourceSizeBytes default = %d, want 1048576", cfg.MaxSourceSizeBytes)
+	}
+	if cfg.MaxStdinSizeBytes != 1<<20 {
+		t.Errorf("MaxStdinSizeBytes default = %d, want 1048576", cfg.MaxStdinSizeBytes)
+	}
+	if cfg.StdoutCaptureLimitBytes != 1<<20 {
+		t.Errorf("StdoutCaptureLimitBytes default = %d, want 1048576", cfg.StdoutCaptureLimitBytes)
+	}
+	if cfg.StderrCaptureLimitBytes != 1<<20 {
+		t.Errorf("StderrCaptureLimitBytes default = %d, want 1048576", cfg.StderrCaptureLimitBytes)
+	}
+	want := config.ResourceCeilings{WallTimeS: 60, CPUTimeS: 60, MemoryMB: 1024, ProcessCount: 64, OutputSizeMB: 64}
+	if cfg.DefaultCeilings != want {
+		t.Errorf("DefaultCeilings = %+v, want %+v", cfg.DefaultCeilings, want)
 	}
 }

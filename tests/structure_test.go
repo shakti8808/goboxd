@@ -46,7 +46,18 @@ var allowedEdges = map[string][]string{
 	"internal/registry": {
 		"internal/security",
 	},
-	"internal/api/handlers": {},
+	"internal/runner": {
+		"internal/security",
+	},
+	"internal/worker": {
+		"internal/runner",
+	},
+	"internal/api/handlers": {
+		"internal/registry",
+		"internal/runner",
+		"internal/security",
+		"internal/worker",
+	},
 	"internal/api":          {},
 }
 

@@ -100,11 +100,53 @@ func TestDroppedCountersRegistered(t *testing.T) {
 	}
 }
 
-// TestExposeFormat verifies the /metrics endpoint returns Prometheus text
-// (or OpenMetrics, when the client negotiates it) carrying the build
-// info line. The architecture spec only mandates Prometheus text format;
-// promhttp may upgrade when the Accept header asks for it, but the body
-// always carries goboxd_build_info either way.
+// TestSecurityRejectionsCounter exercises IncSecurityRejection across
+// every documented rule.
+func TestSecurityRejectionsCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	for _, rule := range []string{
+		metrics.RuleMalformedSubmission,
+		metrics.RuleLanguageNotRegistered,
+		metrics.RuleSourceSizeExceeded,
+		metrics.RuleStdinSizeExceeded,
+		metrics.RuleResourceLimitExceeded,
+	} {
+		c.IncSecurityRejection(rule)
+		c.IncSecurityRejection(rule)
+	}
+
+	families := gather(t, c)
+	rj, ok := families["goboxd_security_rejections_total"]
+	if !ok {
+		t.Fatal("goboxd_security_rejections_total missing")
+	}
+	for _, rule := range []string{
+		metrics.RuleMalformedSubmission,
+		metrics.RuleLanguageNotRegistered,
+		metrics.RuleSourceSizeExceeded,
+		metrics.RuleStdinSizeExceeded,
+		metrics.RuleResourceLimitExceeded,
+	} {
+		if m := findMetric(rj, map[string]string{"rule": rule}); m == nil {
+			t.Errorf("rejection counter for rule %q missing", rule)
+		} else if got := m.GetCounter().GetValue(); got != 2 {
+			t.Errorf("rejection counter for rule %q = %v, want 2", rule, got)
+		}
+	}
+}
+
+// TestSecurityRejectionsCounterNilSafe asserts the observer-failure
+// isolation guard: a nil *Collector or one whose vec is nil must not
+// panic when the run handler invokes the counter.
+func TestSecurityRejectionsCounterNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("IncSecurityRejection panicked on nil collector: %v", r)
+		}
+	}()
+	var c *metrics.Collector
+	c.IncSecurityRejection(metrics.RuleSourceSizeExceeded)
+}
 func TestExposeFormat(t *testing.T) {
 	c := metrics.New("goboxd", "dev")
 	srv := httptest.NewServer(c.Handler())
@@ -127,4 +169,120 @@ func TestExposeFormat(t *testing.T) {
 	if !strings.Contains(string(body), `goboxd_build_info{service="goboxd",version="dev"} 1`) {
 		t.Errorf("/metrics body missing build_info line:\n%s", body)
 	}
+}
+
+
+// TestRunRequestCounter exercises IncRunRequest across language+status
+// pairs and asserts the cumulative values are observable on the
+// registry.
+func TestRunRequestCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncRunRequest("py3", metrics.StatusOK)
+	c.IncRunRequest("py3", metrics.StatusOK)
+	c.IncRunRequest("py3", metrics.StatusTimeLimitExceeded)
+	c.IncRunRequest("cpp", metrics.StatusCompilationError)
+
+	families := gather(t, c)
+	rj, ok := families["goboxd_run_requests_total"]
+	if !ok {
+		t.Fatal("goboxd_run_requests_total missing")
+	}
+	for _, want := range []struct {
+		language, status string
+		count            float64
+	}{
+		{"py3", metrics.StatusOK, 2},
+		{"py3", metrics.StatusTimeLimitExceeded, 1},
+		{"cpp", metrics.StatusCompilationError, 1},
+	} {
+		m := findMetric(rj, map[string]string{"language": want.language, "status": want.status})
+		if m == nil {
+			t.Errorf("counter %s/%s missing", want.language, want.status)
+			continue
+		}
+		if got := m.GetCounter().GetValue(); got != want.count {
+			t.Errorf("counter %s/%s = %v, want %v", want.language, want.status, got, want.count)
+		}
+	}
+}
+
+// TestRunDurationHistogram asserts ObserveRunDuration registers the
+// histogram and emits the documented bucket boundaries from §14.
+func TestRunDurationHistogram(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	for _, s := range []float64{0.005, 0.05, 0.5, 5, 50} {
+		c.ObserveRunDuration(s)
+	}
+	c.ObserveRunDuration(-1) // clamped to 0
+
+	families := gather(t, c)
+	h, ok := families["goboxd_run_duration_seconds"]
+	if !ok {
+		t.Fatal("goboxd_run_duration_seconds missing")
+	}
+	hist := h.GetMetric()[0].GetHistogram()
+	if hist.GetSampleCount() != 6 {
+		t.Errorf("sample count = %d, want 6", hist.GetSampleCount())
+	}
+	bucketBounds := []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
+	if got := len(hist.GetBucket()); got != len(bucketBounds) {
+		t.Errorf("bucket count = %d, want %d", got, len(bucketBounds))
+	}
+}
+
+// TestQueueDepthGauge confirms SetQueueDepth tracks the most-recent
+// value and clamps negatives.
+func TestQueueDepthGauge(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.SetQueueDepth(5)
+	c.SetQueueDepth(7)
+	c.SetQueueDepth(-3) // clamped to 0
+
+	families := gather(t, c)
+	g, ok := families["goboxd_worker_pool_queue_depth"]
+	if !ok {
+		t.Fatal("goboxd_worker_pool_queue_depth missing")
+	}
+	v := g.GetMetric()[0].GetGauge().GetValue()
+	if v != 0 {
+		t.Errorf("queue depth = %v, want 0 after clamp", v)
+	}
+}
+
+// TestSandboxAndIsolationCounters drive the two scalar counters added
+// in Wave D.
+func TestSandboxAndIsolationCounters(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncSandboxCleanupFailure()
+	c.IncSandboxCleanupFailure()
+	c.IncWorkspaceIsolationViolation()
+
+	families := gather(t, c)
+	if cf := families["goboxd_sandbox_cleanup_failures_total"]; cf == nil {
+		t.Fatal("goboxd_sandbox_cleanup_failures_total missing")
+	} else if v := cf.GetMetric()[0].GetCounter().GetValue(); v != 2 {
+		t.Errorf("cleanup_failures = %v, want 2", v)
+	}
+	if iv := families["goboxd_workspace_isolation_violation_total"]; iv == nil {
+		t.Fatal("goboxd_workspace_isolation_violation_total missing")
+	} else if v := iv.GetMetric()[0].GetCounter().GetValue(); v != 1 {
+		t.Errorf("isolation_violations = %v, want 1", v)
+	}
+}
+
+// TestRunMetricsNilSafe asserts every Wave D helper is nil-safe — Wave A
+// observer-failure-isolation (Property 25) demands that a nil collector
+// (or one whose vec was not initialised) cannot panic the run handler.
+func TestRunMetricsNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil collector panicked: %v", r)
+		}
+	}()
+	var c *metrics.Collector
+	c.IncRunRequest("py3", metrics.StatusOK)
+	c.ObserveRunDuration(0.1)
+	c.SetQueueDepth(0)
+	c.IncSandboxCleanupFailure()
+	c.IncWorkspaceIsolationViolation()
 }

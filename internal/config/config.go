@@ -42,6 +42,61 @@ const (
 	maxMaxRequestBodyBytes     = 10 * (1 << 20) // 10 MiB
 )
 
+// Resource_Limits ceilings from architecture spec §15. Each ceiling has
+// a documented default and an inclusive valid range; per-language env
+// overrides land via LANG_<ID>_<LIMIT>_MAX (Phase 2 reads these through
+// PerLanguageCeilings; Wave A only needs the global defaults so the
+// security validator can compare submission overrides to a known cap).
+const (
+	defaultMaxSourceSizeBytes = 1 << 20      // 1 MiB
+	minMaxSourceSizeBytes     = 1
+	maxMaxSourceSizeBytes     = 10 * (1 << 20)
+
+	defaultMaxStdinSizeBytes = 1 << 20 // 1 MiB
+	minMaxStdinSizeBytes     = 0
+	maxMaxStdinSizeBytes     = 10 * (1 << 20)
+
+	// Capture limits from architecture spec §15. Defaults match the
+	// stdin/source defaults so a balanced submission produces a
+	// balanced response envelope; the documented range is identical
+	// to the source-size range so operators can tune in lockstep.
+	defaultStdoutCaptureLimitBytes = 1 << 20
+	minStdoutCaptureLimitBytes     = 1
+	maxStdoutCaptureLimitBytes     = 10 * (1 << 20)
+
+	defaultStderrCaptureLimitBytes = 1 << 20
+	minStderrCaptureLimitBytes     = 1
+	maxStderrCaptureLimitBytes     = 10 * (1 << 20)
+
+	defaultWallTimeSMax     = 60
+	minWallTimeSCeiling     = 1
+	maxWallTimeSCeiling     = 60
+	defaultCPUTimeSMax      = 60
+	minCPUTimeSCeiling      = 1
+	maxCPUTimeSCeiling      = 60
+	defaultMemoryMBMax      = 1024
+	minMemoryMBCeiling      = 16
+	maxMemoryMBCeiling      = 1024
+	defaultProcessCountMax  = 64
+	minProcessCountCeiling  = 1
+	maxProcessCountCeiling  = 64
+	defaultOutputSizeMBMax  = 64
+	minOutputSizeMBCeiling  = 1
+	maxOutputSizeMBCeiling  = 64
+)
+
+// ResourceCeilings holds the per-limit Resource_Limits ceilings the
+// security validator compares submission overrides against. Phase 1
+// records the global defaults; Phase 2 will extend Config with a
+// per-language map that falls back to these globals.
+type ResourceCeilings struct {
+	WallTimeS     int
+	CPUTimeS      int
+	MemoryMB      int
+	ProcessCount  int
+	OutputSizeMB  int
+}
+
 // Config is an immutable snapshot of resolved configuration.
 //
 // Once Load returns successfully the struct is treated as constant for the
@@ -80,6 +135,29 @@ type Config struct {
 	// LanguageRegistryPath is the filesystem path to the YAML language
 	// registry. Default per architecture spec §15.
 	LanguageRegistryPath string
+
+	// MaxSourceSizeBytes is the upper bound on Code_Submission.source.
+	// Validated by Security_Validator (rule source_size_exceeded).
+	MaxSourceSizeBytes int
+
+	// MaxStdinSizeBytes is the upper bound on Code_Submission.stdin.
+	// Validated by Security_Validator (rule stdin_size_exceeded).
+	MaxStdinSizeBytes int
+
+	// StdoutCaptureLimitBytes is the upper bound on bytes the
+	// Sandbox_Runner retains from the child's stdout stream
+	// (architecture REQ A-23.1..A-23.7). Bytes beyond the cap are
+	// discarded streamingly so memory remains bounded.
+	StdoutCaptureLimitBytes int
+
+	// StderrCaptureLimitBytes mirrors StdoutCaptureLimitBytes for stderr.
+	StderrCaptureLimitBytes int
+
+	// DefaultCeilings carries the per-limit Resource_Limits ceilings the
+	// security validator uses when no per-language override is set.
+	// Phase 2 will extend with PerLanguageCeilings; the global defaults
+	// always apply when a language has no explicit ceiling.
+	DefaultCeilings ResourceCeilings
 }
 
 // Lookup mirrors os.LookupEnv: it returns the value and a presence flag.
@@ -155,7 +233,89 @@ func Load(env Lookup) (*Config, error) {
 		return nil, err
 	}
 
+	c.MaxSourceSizeBytes, err = intInRange(env,
+		"MAX_SOURCE_SIZE_BYTES", defaultMaxSourceSizeBytes,
+		minMaxSourceSizeBytes, maxMaxSourceSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.MaxStdinSizeBytes, err = intInRange(env,
+		"MAX_STDIN_SIZE_BYTES", defaultMaxStdinSizeBytes,
+		minMaxStdinSizeBytes, maxMaxStdinSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.StdoutCaptureLimitBytes, err = intInRange(env,
+		"STDOUT_CAPTURE_LIMIT_BYTES", defaultStdoutCaptureLimitBytes,
+		minStdoutCaptureLimitBytes, maxStdoutCaptureLimitBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.StderrCaptureLimitBytes, err = intInRange(env,
+		"STDERR_CAPTURE_LIMIT_BYTES", defaultStderrCaptureLimitBytes,
+		minStderrCaptureLimitBytes, maxStderrCaptureLimitBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.DefaultCeilings, err = loadDefaultCeilings(env)
+	if err != nil {
+		return nil, err
+	}
+
 	return c, nil
+}
+
+// loadDefaultCeilings reads the global LANG_DEFAULT_*_MAX env keys (or
+// falls back to the architecture-spec defaults). The Phase 2 validator
+// will read per-language overrides via Config.CeilingsFor(id); Wave A
+// only needs a single source of truth.
+func loadDefaultCeilings(env Lookup) (ResourceCeilings, error) {
+	c := ResourceCeilings{}
+	var err error
+	c.WallTimeS, err = intInRange(env,
+		"LANG_DEFAULT_WALL_TIME_S_MAX", defaultWallTimeSMax,
+		minWallTimeSCeiling, maxWallTimeSCeiling)
+	if err != nil {
+		return c, err
+	}
+	c.CPUTimeS, err = intInRange(env,
+		"LANG_DEFAULT_CPU_TIME_S_MAX", defaultCPUTimeSMax,
+		minCPUTimeSCeiling, maxCPUTimeSCeiling)
+	if err != nil {
+		return c, err
+	}
+	c.MemoryMB, err = intInRange(env,
+		"LANG_DEFAULT_MEMORY_MB_MAX", defaultMemoryMBMax,
+		minMemoryMBCeiling, maxMemoryMBCeiling)
+	if err != nil {
+		return c, err
+	}
+	c.ProcessCount, err = intInRange(env,
+		"LANG_DEFAULT_PROCESS_COUNT_MAX", defaultProcessCountMax,
+		minProcessCountCeiling, maxProcessCountCeiling)
+	if err != nil {
+		return c, err
+	}
+	c.OutputSizeMB, err = intInRange(env,
+		"LANG_DEFAULT_OUTPUT_SIZE_MB_MAX", defaultOutputSizeMBMax,
+		minOutputSizeMBCeiling, maxOutputSizeMBCeiling)
+	if err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// CeilingsFor returns the Resource_Limits ceilings effective for the
+// given language identifier.
+//
+// Phase 2 will extend Config with per-language overrides; Wave A keeps
+// the API stable so callers do not need to change.
+func (c *Config) CeilingsFor(_ string) ResourceCeilings {
+	return c.DefaultCeilings
 }
 
 // osLookup is the production Lookup, reading os.LookupEnv.
