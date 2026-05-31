@@ -1,0 +1,39 @@
+# GoboxD language registry — Phase 1 default.
+#
+# Schema: see .kiro/specs/goboxd-architecture/design.md §12.
+# Loaded at startup by internal/registry; see internal/registry/registry.go.
+
+languages:
+  - id: py3
+    source_filename: main.py
+    run:
+      command: /usr/bin/python3
+      args: ["main.py"]
+      limits:
+        wall_time_s: 10
+        cpu_time_s: 10
+        memory_mb: 256
+        process_count: 16
+        output_size_mb: 4
+
+  - id: cpp
+    source_filename: main.cpp
+    binary_filename: main
+    compile:
+      command: /usr/bin/g++
+      args: ["-O2", "-std=c++17", "-o", "main", "main.cpp"]
+      limits:
+        wall_time_s: 20
+        cpu_time_s: 20
+        memory_mb: 512
+        process_count: 32
+        output_size_mb: 16
+    run:
+      command: ./main
+      args: []
+      limits:
+        wall_time_s: 10
+        cpu_time_s: 10
+        memory_mb: 256
+        process_count: 16
+        output_size_mb: 4
