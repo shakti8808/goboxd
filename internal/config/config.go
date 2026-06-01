@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Defaults documented in the architecture spec §15.
@@ -28,6 +29,12 @@ const (
 	defaultWorkerPoolQueueLen      = 64
 	defaultWorkerPoolDrainTimeoutS = 30
 	defaultLanguageRegistryPath    = "/etc/goboxd/language_registry.yaml"
+	defaultNsJailPath              = "/usr/local/bin/nsjail"
+	defaultSandboxRoot             = "/var/lib/goboxd/sandbox"
+	defaultSeccompPolicy           = "default"
+	defaultSandboxOrphanTTLS       = 600
+	defaultSandboxRoMounts         = "/usr:/usr,/lib:/lib,/lib64:/lib64,/bin:/bin,/etc/alternatives:/etc/alternatives"
+	defaultSandboxRootDirPermsMax  = 0775
 )
 
 // Documented ranges from architecture spec §9 and §15.
@@ -40,6 +47,8 @@ const (
 	maxWorkerPoolDrainTimeoutS = 3600
 	minMaxRequestBodyBytes     = 1
 	maxMaxRequestBodyBytes     = 10 * (1 << 20) // 10 MiB
+	minSandboxOrphanTTLS       = 60
+	maxSandboxOrphanTTLS       = 86400
 )
 
 // Resource_Limits ceilings from architecture spec §15. Each ceiling has
@@ -95,6 +104,12 @@ type ResourceCeilings struct {
 	MemoryMB      int
 	ProcessCount  int
 	OutputSizeMB  int
+}
+
+// BindMount is a read-only bind mount configuration for the sandbox.
+type BindMount struct {
+	HostPath  string
+	GuestPath string
 }
 
 // Config is an immutable snapshot of resolved configuration.
@@ -158,6 +173,29 @@ type Config struct {
 	// Phase 2 will extend with PerLanguageCeilings; the global defaults
 	// always apply when a language has no explicit ceiling.
 	DefaultCeilings ResourceCeilings
+
+	// NsJailPath is the absolute path to the nsjail binary.
+	NsJailPath string
+
+	// SandboxRoot is the absolute path to the directory hosting sandbox workspaces.
+	SandboxRoot string
+
+	// SeccompPolicy is the static seccomp policy string.
+	SeccompPolicy string
+
+	// SandboxOrphanTTL is the duration job workspaces are allowed to survive before being reaped.
+	SandboxOrphanTTL time.Duration
+
+	// SandboxRoMounts lists the read-only bind mounts configured for nsjail.
+	SandboxRoMounts []BindMount
+
+	// SandboxRootDirOwnerUID is the optional UID that must own the sandbox root directory.
+	// When unset (nil), the effective UID of the GoboxD process user is checked.
+	SandboxRootDirOwnerUID *uint32
+
+	// SandboxRootDirPermsMax is the maximum allowed permission bits for the sandbox root directory.
+	// Default is 0775 (octal).
+	SandboxRootDirPermsMax os.FileMode
 }
 
 // Lookup mirrors os.LookupEnv: it returns the value and a presence flag.
@@ -266,7 +304,84 @@ func Load(env Lookup) (*Config, error) {
 		return nil, err
 	}
 
+	c.NsJailPath = stringOr(env, "NSJAIL_PATH", defaultNsJailPath)
+	c.SandboxRoot = stringOr(env, "SANDBOX_ROOT_DIR", defaultSandboxRoot)
+	c.SeccompPolicy = stringOr(env, "SANDBOX_SECCOMP_POLICY", defaultSeccompPolicy)
+
+	ttlS, err := intInRange(env, "SANDBOX_ORPHAN_TTL_S", defaultSandboxOrphanTTLS, minSandboxOrphanTTLS, maxSandboxOrphanTTLS)
+	if err != nil {
+		return nil, err
+	}
+	c.SandboxOrphanTTL = time.Duration(ttlS) * time.Second
+
+	roMountsRaw := stringOr(env, "SANDBOX_RO_MOUNTS", defaultSandboxRoMounts)
+	c.SandboxRoMounts, err = parseBindMounts(roMountsRaw)
+	if err != nil {
+		return nil, &InvalidKeyError{Key: "SANDBOX_RO_MOUNTS", Reason: err.Error()}
+	}
+
+	rawOwner, ok := env("SANDBOX_ROOT_DIR_OWNER_UID")
+	if ok && strings.TrimSpace(rawOwner) != "" {
+		uidVal, err := strconv.ParseUint(strings.TrimSpace(rawOwner), 10, 32)
+		if err != nil {
+			return nil, &InvalidKeyError{Key: "SANDBOX_ROOT_DIR_OWNER_UID", Reason: fmt.Sprintf("not an integer: %v", err)}
+		}
+		uid := uint32(uidVal)
+		c.SandboxRootDirOwnerUID = &uid
+	}
+
+	rawPerms, ok := env("SANDBOX_ROOT_DIR_PERMS_MAX")
+	if !ok || strings.TrimSpace(rawPerms) == "" {
+		c.SandboxRootDirPermsMax = os.FileMode(defaultSandboxRootDirPermsMax)
+	} else {
+		trimmedPerms := strings.TrimSpace(rawPerms)
+		trimmedPerms = strings.TrimPrefix(trimmedPerms, "0o")
+		permsVal, err := strconv.ParseUint(trimmedPerms, 8, 32)
+		if err != nil {
+			return nil, &InvalidKeyError{Key: "SANDBOX_ROOT_DIR_PERMS_MAX", Reason: fmt.Sprintf("invalid octal format: %v", err)}
+		}
+		if permsVal > 0777 {
+			return nil, &InvalidKeyError{Key: "SANDBOX_ROOT_DIR_PERMS_MAX", Reason: fmt.Sprintf("value %o outside permitted range [0000, 0777]", permsVal)}
+		}
+		if permsVal&0002 != 0 {
+			return nil, &InvalidKeyError{Key: "SANDBOX_ROOT_DIR_PERMS_MAX", Reason: "world-writable permission bits are rejected"}
+		}
+		c.SandboxRootDirPermsMax = os.FileMode(permsVal)
+	}
+
 	return c, nil
+}
+
+// parseBindMounts parses a comma-separated list of host:guest pairs.
+func parseBindMounts(s string) ([]BindMount, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	parts := strings.Split(s, ",")
+	var mounts []BindMount
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		subparts := strings.Split(part, ":")
+		if len(subparts) != 2 {
+			return nil, fmt.Errorf("invalid bind mount format: %q (want host:guest)", part)
+		}
+		host := strings.TrimSpace(subparts[0])
+		guest := strings.TrimSpace(subparts[1])
+		if host == "" || guest == "" {
+			return nil, fmt.Errorf("invalid bind mount paths in %q", part)
+		}
+		mounts = append(mounts, BindMount{
+			HostPath:  host,
+			GuestPath: guest,
+		})
+	}
+	return mounts, nil
 }
 
 // loadDefaultCeilings reads the global LANG_DEFAULT_*_MAX env keys (or

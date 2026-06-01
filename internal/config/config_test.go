@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thesouldev/goboxd/internal/config"
 )
@@ -48,6 +49,12 @@ func TestLoadDefaultsApplied(t *testing.T) {
 	if cfg.ServiceName != "" {
 		t.Errorf("ServiceName = %q, want empty (callers fall back to version.ServiceName)", cfg.ServiceName)
 	}
+	if cfg.SandboxRootDirOwnerUID != nil {
+		t.Errorf("SandboxRootDirOwnerUID = %v, want nil", cfg.SandboxRootDirOwnerUID)
+	}
+	if cfg.SandboxRootDirPermsMax != 0775 {
+		t.Errorf("SandboxRootDirPermsMax = %o, want 0775", cfg.SandboxRootDirPermsMax)
+	}
 }
 
 // TestLoadEnvOverrides confirms env vars override the defaults.
@@ -63,6 +70,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 		"WORKER_POOL_DRAIN_TIMEOUT_S": "60",
 		"MAX_REQUEST_BODY_BYTES":      "2097152",
 		"LANGUAGE_REGISTRY_PATH":      "/srv/registry.yaml",
+		"SANDBOX_ROOT_DIR_OWNER_UID":  "12345",
+		"SANDBOX_ROOT_DIR_PERMS_MAX":  "0700",
 	}))
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -81,6 +90,12 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	if cfg.ServiceName != "custom-name" || cfg.BuildVersion != "v1.2.3" {
 		t.Errorf("name/version overrides missed: %+v", cfg)
+	}
+	if cfg.SandboxRootDirOwnerUID == nil || *cfg.SandboxRootDirOwnerUID != 12345 {
+		t.Errorf("SandboxRootDirOwnerUID override missed: %v", cfg.SandboxRootDirOwnerUID)
+	}
+	if cfg.SandboxRootDirPermsMax != 0700 {
+		t.Errorf("SandboxRootDirPermsMax override missed: %o", cfg.SandboxRootDirPermsMax)
 	}
 }
 
@@ -113,6 +128,16 @@ func TestLoadInvalidValues(t *testing.T) {
 		{"memory ceiling below floor", map[string]string{"LANG_DEFAULT_MEMORY_MB_MAX": "1"}, "LANG_DEFAULT_MEMORY_MB_MAX"},
 		{"process ceiling zero", map[string]string{"LANG_DEFAULT_PROCESS_COUNT_MAX": "0"}, "LANG_DEFAULT_PROCESS_COUNT_MAX"},
 		{"output ceiling above max", map[string]string{"LANG_DEFAULT_OUTPUT_SIZE_MB_MAX": "999"}, "LANG_DEFAULT_OUTPUT_SIZE_MB_MAX"},
+		{"orphan ttl below min", map[string]string{"SANDBOX_ORPHAN_TTL_S": "59"}, "SANDBOX_ORPHAN_TTL_S"},
+		{"orphan ttl above max", map[string]string{"SANDBOX_ORPHAN_TTL_S": "86401"}, "SANDBOX_ORPHAN_TTL_S"},
+		{"ro mounts invalid format", map[string]string{"SANDBOX_RO_MOUNTS": "/usr"}, "SANDBOX_RO_MOUNTS"},
+		{"owner uid negative", map[string]string{"SANDBOX_ROOT_DIR_OWNER_UID": "-1"}, "SANDBOX_ROOT_DIR_OWNER_UID"},
+		{"owner uid not int", map[string]string{"SANDBOX_ROOT_DIR_OWNER_UID": "root"}, "SANDBOX_ROOT_DIR_OWNER_UID"},
+		{"owner uid too large", map[string]string{"SANDBOX_ROOT_DIR_OWNER_UID": "4294967296"}, "SANDBOX_ROOT_DIR_OWNER_UID"},
+		{"perms max invalid octal", map[string]string{"SANDBOX_ROOT_DIR_PERMS_MAX": "0999"}, "SANDBOX_ROOT_DIR_PERMS_MAX"},
+		{"perms max world-writable 0777", map[string]string{"SANDBOX_ROOT_DIR_PERMS_MAX": "0777"}, "SANDBOX_ROOT_DIR_PERMS_MAX"},
+		{"perms max world-writable 0002", map[string]string{"SANDBOX_ROOT_DIR_PERMS_MAX": "0002"}, "SANDBOX_ROOT_DIR_PERMS_MAX"},
+		{"perms max above 0777", map[string]string{"SANDBOX_ROOT_DIR_PERMS_MAX": "01000"}, "SANDBOX_ROOT_DIR_PERMS_MAX"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,5 +220,20 @@ func TestLoadDefaultsForNewKeys(t *testing.T) {
 	want := config.ResourceCeilings{WallTimeS: 60, CPUTimeS: 60, MemoryMB: 1024, ProcessCount: 64, OutputSizeMB: 64}
 	if cfg.DefaultCeilings != want {
 		t.Errorf("DefaultCeilings = %+v, want %+v", cfg.DefaultCeilings, want)
+	}
+	if cfg.NsJailPath != "/usr/local/bin/nsjail" {
+		t.Errorf("NsJailPath default = %q", cfg.NsJailPath)
+	}
+	if cfg.SandboxRoot != "/var/lib/goboxd/sandbox" {
+		t.Errorf("SandboxRoot default = %q", cfg.SandboxRoot)
+	}
+	if cfg.SeccompPolicy != "default" {
+		t.Errorf("SeccompPolicy default = %q", cfg.SeccompPolicy)
+	}
+	if cfg.SandboxOrphanTTL != 600*time.Second {
+		t.Errorf("SandboxOrphanTTL default = %v", cfg.SandboxOrphanTTL)
+	}
+	if len(cfg.SandboxRoMounts) != 5 {
+		t.Errorf("SandboxRoMounts length = %d, want 5", len(cfg.SandboxRoMounts))
 	}
 }

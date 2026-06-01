@@ -1,12 +1,10 @@
 // Command goboxd serves the GoboxD HTTP API.
 //
-// Phase 1 wiring: load configuration, initialise the structured logger,
+// Phase 2 wiring: load configuration, initialise the structured logger,
 // initialise the Prometheus metrics registry, load the YAML language
-// registry, build the API server with /healthz, /readyz, /info, /metrics
-// handlers and a /run stub returning HTTP 503 not_implemented, install
-// SIGINT/SIGTERM handlers, and run until shutdown. Worker pool, security
-// validator, sandbox runner, and the run-pipeline portion of the metrics
-// catalog are added in Phase 2 and Phase 3.
+// registry, build the API server with /healthz, /readyz, /info, /metrics,
+// and /run handlers. Worker pool, security validator, sandbox runner, and
+// orphan reaper are wired into main.
 package main
 
 import (
@@ -26,7 +24,10 @@ import (
 	goboxlog "github.com/thesouldev/goboxd/internal/log"
 	"github.com/thesouldev/goboxd/internal/metrics"
 	"github.com/thesouldev/goboxd/internal/registry"
+	"github.com/thesouldev/goboxd/internal/runner"
+	"github.com/thesouldev/goboxd/internal/security"
 	"github.com/thesouldev/goboxd/internal/version"
+	"github.com/thesouldev/goboxd/internal/worker"
 )
 
 // shutdownGrace is the extra time granted to in-flight HTTP requests
@@ -85,12 +86,13 @@ func run() error {
 	// observable from the moment /metrics is wired below.
 	mc := metrics.New(serviceName, buildVersion)
 
-	// Readiness flags. Phase 1 wires three; later phases extend the set
-	// with worker_pool_ready and nsjail_present_and_executable.
+	// Readiness flags.
 	var (
 		startupCompleted       atomic.Bool
 		languageRegistryLoaded atomic.Bool
 		shutdownInProgress     atomic.Bool
+		workerPoolReady        atomic.Bool
+		nsjailPresent          atomic.Bool
 	)
 
 	reg, err := registry.Load(cfg.LanguageRegistryPath)
@@ -110,15 +112,106 @@ func run() error {
 		"languages", languages,
 	)
 
-	healthH := handlers.NewHealthHandler(&startupCompleted, &languageRegistryLoaded, &shutdownInProgress)
+	// Validate startup prerequisites.
+	if err := validatePrereqs(cfg, mc, log); err != nil {
+		return err
+	}
+	nsjailPresent.Store(true)
+
+	// Map config.BindMount to runner.BindMount
+	runnerMounts := make([]runner.BindMount, len(cfg.SandboxRoMounts))
+	for i, m := range cfg.SandboxRoMounts {
+		runnerMounts[i] = runner.BindMount{
+			HostPath:  m.HostPath,
+			GuestPath: m.GuestPath,
+			ReadWrite: false,
+		}
+	}
+
+	// Instantiate SandboxRunner
+	runCfg := runner.SandboxConfig{
+		NsJailPath:              cfg.NsJailPath,
+		SandboxRoot:             cfg.SandboxRoot,
+		SeccompPolicy:           cfg.SeccompPolicy,
+		LaunchTimeout:           5 * time.Second, // Hardcoded 5s per REQ-10.7
+		BindMounts:              runnerMounts,
+		EnvAllowlist:            nil,
+		StdoutCaptureLimitBytes: cfg.StdoutCaptureLimitBytes,
+		StderrCaptureLimitBytes: cfg.StderrCaptureLimitBytes,
+		Observer:                sandboxObserver{logger: log, metrics: mc},
+		WorkspaceObs:            workspaceObserver{logger: log, metrics: mc},
+	}
+	sandboxRunner, err := runner.New(runCfg)
+	if err != nil {
+		return fmt.Errorf("initialize sandbox runner: %w", err)
+	}
+
+	// Instantiate and start OrphanReaper
+	reaperCfg := runner.ReaperConfig{
+		Root:     cfg.SandboxRoot,
+		TTL:      cfg.SandboxOrphanTTL,
+		Observer: reaperObserver{logger: log, metrics: mc},
+	}
+	reaper, err := runner.NewOrphanReaper(reaperCfg)
+	if err != nil {
+		return fmt.Errorf("initialize orphan reaper: %w", err)
+	}
+
+	reaperCtx, reaperCancel := context.WithCancel(context.Background())
+	defer reaperCancel()
+	go func() {
+		if err := reaper.Start(reaperCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("reaper_failed", "error", err.Error())
+		}
+	}()
+
+	// Instantiate and start WorkerPool
+	poolCfg := worker.Config{
+		Workers:      cfg.WorkerPoolSize,
+		QueueLen:     cfg.WorkerPoolQueueLen,
+		DrainTimeout: time.Duration(cfg.WorkerPoolDrainTimeoutS) * time.Second,
+		Runner:       sandboxRunner,
+		Observer:     poolObserver{metrics: mc},
+	}
+	pool, err := worker.New(poolCfg)
+	if err != nil {
+		return fmt.Errorf("initialize worker pool: %w", err)
+	}
+	workerPoolReady.Store(true)
+
+	// Instantiate FullRunHandler
+	runDeps := handlers.RunDeps{
+		Logger:         log,
+		Validator:      validatorAdapter{},
+		Registry:       reg,
+		Pool:           pool,
+		Metrics:        mc,
+		SizeBounds: security.SizeBounds{
+			MaxSourceSizeBytes: cfg.MaxSourceSizeBytes,
+			MaxStdinSizeBytes:  cfg.MaxStdinSizeBytes,
+		},
+		CeilingsLookup: validatorCeilingsAdapter{cfg: cfg},
+	}
+	runH, err := handlers.NewFullRunHandler(runDeps)
+	if err != nil {
+		return fmt.Errorf("initialize run handler: %w", err)
+	}
+
+	healthH := handlers.NewHealthHandler(
+		&startupCompleted,
+		&languageRegistryLoaded,
+		&shutdownInProgress,
+		&workerPoolReady,
+		&nsjailPresent,
+		cfg.NsJailPath,
+	)
 	infoH := handlers.NewInfoHandler(serviceName, buildVersion, cfg.WorkerPoolSize, languages)
-	runH := handlers.NewRunHandler()
 
 	routes := []api.Route{
 		{Path: "/healthz", Method: http.MethodGet, Handler: http.HandlerFunc(healthH.Live)},
 		{Path: "/readyz", Method: http.MethodGet, Handler: http.HandlerFunc(healthH.Ready)},
 		{Path: "/info", Method: http.MethodGet, Handler: http.HandlerFunc(infoH.Info)},
-		{Path: "/run", Method: http.MethodPost, Handler: http.HandlerFunc(runH.Run)},
+		{Path: "/run", Method: http.MethodPost, Handler: http.HandlerFunc(runH.ServeHTTP)},
 		{Path: "/metrics", Method: http.MethodGet, Handler: mc.Handler()},
 	}
 
@@ -152,12 +245,9 @@ func run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	var sig os.Signal
 	select {
-	case sig := <-sigCh:
-		log.Info("shutdown_begin",
-			"event", "shutdown_begin",
-			"signal", sig.String(),
-		)
+	case sig = <-sigCh:
 		shutdownInProgress.Store(true)
 	case err := <-errCh:
 		if err != nil {
@@ -171,6 +261,17 @@ func run() error {
 		// successful shutdown.
 		return nil
 	}
+
+	// Graceful shutdown sequence
+	reaperCancel()
+	drained, cancelled := pool.Drain(time.Duration(cfg.WorkerPoolDrainTimeoutS) * time.Second)
+
+	log.Info("shutdown_begin",
+		"event", "shutdown_begin",
+		"signal", sig.String(),
+		"drained_count", drained,
+		"cancelled_count", cancelled,
+	)
 
 	// Drain timeout from configuration plus a small grace window for
 	// final response flushes.
@@ -197,4 +298,13 @@ func run() error {
 		"event", "shutdown_complete",
 	)
 	return nil
+}
+
+// isNsJailExecutable checks if a file exists and is executable.
+func isNsJailExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular() && (info.Mode().Perm()&0111 != 0)
 }

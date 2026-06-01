@@ -16,8 +16,8 @@ import (
 // JSON body, independent of the readiness flags.
 func TestHealthLive(t *testing.T) {
 	t.Parallel()
-	var startup, registry, shutdown atomic.Bool
-	h := handlers.NewHealthHandler(&startup, &registry, &shutdown)
+	var startup, registry, shutdown, pool, nsjail atomic.Bool
+	h := handlers.NewHealthHandler(&startup, &registry, &shutdown, &pool, &nsjail, "/usr/local/bin/nsjail")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.Live(rec, req)
@@ -30,7 +30,7 @@ func TestHealthLive(t *testing.T) {
 	}
 }
 
-// TestHealthReadyMatrix walks every combination of the three readiness
+// TestHealthReadyMatrix walks every combination of the readiness
 // flags. Property 5: the response enumerates every failing flag.
 func TestHealthReadyMatrix(t *testing.T) {
 	t.Parallel()
@@ -39,22 +39,28 @@ func TestHealthReadyMatrix(t *testing.T) {
 		startup      bool
 		registry     bool
 		shutdown     bool
+		pool         bool
+		nsjail       bool
 		wantStatus   int
 		wantFailures []string
 	}{
-		{"all up", true, true, false, http.StatusOK, nil},
-		{"startup not done", false, true, false, http.StatusServiceUnavailable, []string{"startup"}},
-		{"registry missing", true, false, false, http.StatusServiceUnavailable, []string{"Language_Registry"}},
-		{"shutdown only", true, true, true, http.StatusServiceUnavailable, []string{"shutdown"}},
-		{"all failing", false, false, true, http.StatusServiceUnavailable, []string{"startup", "Language_Registry", "shutdown"}},
+		{"all up", true, true, false, true, true, http.StatusOK, nil},
+		{"startup not done", false, true, false, true, true, http.StatusServiceUnavailable, []string{"startup"}},
+		{"registry missing", true, false, false, true, true, http.StatusServiceUnavailable, []string{"Language_Registry"}},
+		{"pool not ready", true, true, false, false, true, http.StatusServiceUnavailable, []string{"Worker_Pool"}},
+		{"nsjail missing", true, true, false, true, false, http.StatusServiceUnavailable, []string{"NsJail"}},
+		{"shutdown only", true, true, true, true, true, http.StatusServiceUnavailable, []string{"shutdown"}},
+		{"all failing", false, false, true, false, false, http.StatusServiceUnavailable, []string{"startup", "Language_Registry", "Worker_Pool", "NsJail", "shutdown"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var startup, registry, shutdown atomic.Bool
+			var startup, registry, shutdown, pool, nsjail atomic.Bool
 			startup.Store(tc.startup)
 			registry.Store(tc.registry)
 			shutdown.Store(tc.shutdown)
-			h := handlers.NewHealthHandler(&startup, &registry, &shutdown)
+			pool.Store(tc.pool)
+			nsjail.Store(tc.nsjail)
+			h := handlers.NewHealthHandler(&startup, &registry, &shutdown, &pool, &nsjail, "/usr/local/bin/nsjail")
 
 			rec := httptest.NewRecorder()
 			h.Ready(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -97,6 +103,11 @@ func TestHealthReadyMatrix(t *testing.T) {
 				}
 				if reason, ok := entry["reason"].(string); !ok || reason == "" {
 					t.Errorf("failed_components[%d].reason missing", i)
+				}
+				if want == "NsJail" {
+					if entry["path"] != "/usr/local/bin/nsjail" {
+						t.Errorf("expected NsJail path override check but got = %v", entry["path"])
+					}
 				}
 			}
 		})

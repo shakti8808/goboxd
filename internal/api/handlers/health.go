@@ -24,17 +24,26 @@ type HealthHandler struct {
 	startupCompleted        *atomic.Bool
 	languageRegistryLoaded  *atomic.Bool
 	shutdownInProgress      *atomic.Bool
+	workerPoolReady         *atomic.Bool
+	nsjailPresent           *atomic.Bool
+	nsjailPath              string
 }
 
 // NewHealthHandler constructs a HealthHandler bound to the given flags.
 //
 // All pointers must be non-nil; callers own the underlying values and
 // flip them as the process lifecycle progresses.
-func NewHealthHandler(startupCompleted, languageRegistryLoaded, shutdownInProgress *atomic.Bool) *HealthHandler {
+func NewHealthHandler(
+	startupCompleted, languageRegistryLoaded, shutdownInProgress, workerPoolReady, nsjailPresent *atomic.Bool,
+	nsjailPath string,
+) *HealthHandler {
 	return &HealthHandler{
 		startupCompleted:       startupCompleted,
 		languageRegistryLoaded: languageRegistryLoaded,
 		shutdownInProgress:     shutdownInProgress,
+		workerPoolReady:        workerPoolReady,
+		nsjailPresent:          nsjailPresent,
+		nsjailPath:             nsjailPath,
 	}
 }
 
@@ -78,6 +87,19 @@ func (h *HealthHandler) failedComponents() []map[string]string {
 		out = append(out, map[string]string{
 			"component": "Language_Registry",
 			"reason":    "registry_not_loaded",
+		})
+	}
+	if !h.workerPoolReady.Load() {
+		out = append(out, map[string]string{
+			"component": "Worker_Pool",
+			"reason":    "pool_not_ready",
+		})
+	}
+	if !h.nsjailPresent.Load() {
+		out = append(out, map[string]string{
+			"component": "NsJail",
+			"reason":    "nsjail_not_present",
+			"path":      h.nsjailPath,
 		})
 	}
 	if h.shutdownInProgress.Load() {

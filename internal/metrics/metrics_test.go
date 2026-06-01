@@ -286,3 +286,71 @@ func TestRunMetricsNilSafe(t *testing.T) {
 	c.IncSandboxCleanupFailure()
 	c.IncWorkspaceIsolationViolation()
 }
+
+// TestStartupPrereqFailuresCounter registers and increments the startup prereq failures counter.
+func TestStartupPrereqFailuresCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncStartupPrereqFailure("sandbox_root")
+	c.IncStartupPrereqFailure("sandbox_root")
+	c.IncStartupPrereqFailure("ro_mount")
+
+	families := gather(t, c)
+	sp, ok := families["goboxd_startup_prereq_failures_total"]
+	if !ok {
+		t.Fatal("goboxd_startup_prereq_failures_total missing")
+	}
+
+	m := findMetric(sp, map[string]string{"prereq": "sandbox_root"})
+	if m == nil {
+		t.Fatal("sandbox_root counter missing")
+	}
+	if v := m.GetCounter().GetValue(); v != 2 {
+		t.Errorf("sandbox_root value = %v, want 2", v)
+	}
+
+	m2 := findMetric(sp, map[string]string{"prereq": "ro_mount"})
+	if m2 == nil {
+		t.Fatal("ro_mount counter missing")
+	}
+	if v := m2.GetCounter().GetValue(); v != 1 {
+		t.Errorf("ro_mount value = %v, want 1", v)
+	}
+}
+
+// TestStartupPrereqFailuresCounterNilSafe asserts nil safety of the recorder.
+func TestStartupPrereqFailuresCounterNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("IncStartupPrereqFailure panicked on nil collector: %v", r)
+		}
+	}()
+	var c *metrics.Collector
+	c.IncStartupPrereqFailure("sandbox_root")
+}
+
+// TestOrphanWorkspaceReapedCounter asserts registration and increment logic of the orphan reaped counter.
+func TestOrphanWorkspaceReapedCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncOrphanWorkspaceReaped()
+	c.IncOrphanWorkspaceReaped()
+
+	families := gather(t, c)
+	ow, ok := families["goboxd_orphan_workspace_reaped_total"]
+	if !ok {
+		t.Fatal("goboxd_orphan_workspace_reaped_total missing")
+	}
+	if v := ow.GetMetric()[0].GetCounter().GetValue(); v != 2 {
+		t.Errorf("orphan_reaped value = %v, want 2", v)
+	}
+}
+
+// TestOrphanWorkspaceReapedCounterNilSafe asserts nil safety.
+func TestOrphanWorkspaceReapedCounterNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("IncOrphanWorkspaceReaped panicked on nil collector: %v", r)
+		}
+	}()
+	var c *metrics.Collector
+	c.IncOrphanWorkspaceReaped()
+}

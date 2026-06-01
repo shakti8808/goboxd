@@ -90,6 +90,8 @@ type Collector struct {
 	queueDepth                   prometheus.Gauge
 	sandboxCleanupFailures       prometheus.Counter
 	workspaceIsolationViolations prometheus.Counter
+	startupPrereqFailures        *prometheus.CounterVec
+	orphanWorkspaceReaped        prometheus.Counter
 }
 
 // New constructs a Collector and registers every Phase 1 metric.
@@ -139,12 +141,21 @@ func New(service, version string) *Collector {
 			Name: "goboxd_workspace_isolation_violation_total",
 			Help: "Count of workspace ownership-invariant violations observed by SandboxRunner.",
 		}),
+		startupPrereqFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "goboxd_startup_prereq_failures_total",
+			Help: "Count of startup prerequisite validation failures.",
+		}, []string{"prereq"}),
+		orphanWorkspaceReaped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "goboxd_orphan_workspace_reaped_total",
+			Help: "Count of stale orphan sandbox directories reaped.",
+		}),
 	}
 
 	r.MustRegister(
 		c.buildInfo, c.droppedLogs, c.droppedMetrics, c.securityRejections,
 		c.runRequests, c.runDuration, c.queueDepth,
 		c.sandboxCleanupFailures, c.workspaceIsolationViolations,
+		c.startupPrereqFailures, c.orphanWorkspaceReaped,
 	)
 
 	// Initialise the build-info gauge so it appears on /metrics from
@@ -258,4 +269,20 @@ func (c *Collector) IncWorkspaceIsolationViolation() {
 		return
 	}
 	c.workspaceIsolationViolations.Inc()
+}
+
+// IncStartupPrereqFailure increments goboxd_startup_prereq_failures_total{prereq}.
+func (c *Collector) IncStartupPrereqFailure(prereq string) {
+	if c == nil || c.startupPrereqFailures == nil {
+		return
+	}
+	c.startupPrereqFailures.WithLabelValues(prereq).Inc()
+}
+
+// IncOrphanWorkspaceReaped increments goboxd_orphan_workspace_reaped_total.
+func (c *Collector) IncOrphanWorkspaceReaped() {
+	if c == nil || c.orphanWorkspaceReaped == nil {
+		return
+	}
+	c.orphanWorkspaceReaped.Inc()
 }
