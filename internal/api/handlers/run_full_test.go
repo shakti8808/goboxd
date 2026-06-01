@@ -19,13 +19,6 @@ import (
 	"github.com/thesouldev/goboxd/internal/worker"
 )
 
-// stubValidator returns a configurable rejection.
-type stubValidator struct{ rejection error }
-
-func (s stubValidator) Validate(_ security.Submission, _ security.SizeBounds, _ security.LanguageDefinitionLookup, _ security.CeilingsLookup) error {
-	return s.rejection
-}
-
 // realValidator wraps the production security.Validate so the
 // happy-path test exercises real rule ordering.
 type realValidator struct{}

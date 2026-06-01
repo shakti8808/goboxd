@@ -71,5 +71,3 @@ func (q *queue) drain() []Job {
 // goboxd_worker_pool_queue_depth.
 func (q *queue) depth() int { return len(q.c) }
 
-// capacity returns the queue's configured capacity.
-func (q *queue) capacity() int { return cap(q.c) }

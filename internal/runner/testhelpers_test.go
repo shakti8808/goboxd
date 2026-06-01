@@ -2,7 +2,6 @@ package runner_test
 
 import (
 	"context"
-	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -172,15 +171,3 @@ func (c *fakeClock) Now() time.Time {
 // type.
 func readerOf(s string) io.Reader { return strings.NewReader(s) }
 
-// errReader returns an io.Reader that yields err on its first Read.
-type errReader struct{ err error }
-
-func (e errReader) Read([]byte) (int, error) { return 0, e.err }
-
-// errReaderOf wraps the provided error in an io.Reader.
-func errReaderOf(err error) io.Reader { return errReader{err: err} }
-
-// errIs is a slim wrapper around errors.Is for callsites where the
-// pattern would otherwise add an import to the test file just for one
-// call.
-func errIs(err, target error) bool { return errors.Is(err, target) }
