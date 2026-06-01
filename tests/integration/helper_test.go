@@ -60,6 +60,14 @@ func startServer(t *testing.T, env map[string]string) *serverInstance {
 		}
 	}
 
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/lib64"); os.IsNotExist(err) {
+			if _, ok := env["SANDBOX_RO_MOUNTS"]; !ok {
+				cmd.Env = append(cmd.Env, "SANDBOX_RO_MOUNTS=/usr:/usr,/lib:/lib,/bin:/bin,/etc/alternatives:/etc/alternatives")
+			}
+		}
+	}
+
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -152,6 +160,14 @@ func runServerExpectFailure(t *testing.T, env map[string]string) (int, string, s
 		absPath, err := filepath.Abs("../../configs/language_registry.yaml")
 		if err == nil {
 			cmd.Env = append(cmd.Env, "LANGUAGE_REGISTRY_PATH="+absPath)
+		}
+	}
+
+	if runtime.GOOS == "linux" {
+		if _, err := os.Stat("/lib64"); os.IsNotExist(err) {
+			if _, ok := env["SANDBOX_RO_MOUNTS"]; !ok {
+				cmd.Env = append(cmd.Env, "SANDBOX_RO_MOUNTS=/usr:/usr,/lib:/lib,/bin:/bin,/etc/alternatives:/etc/alternatives")
+			}
 		}
 	}
 
