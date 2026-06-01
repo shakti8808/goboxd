@@ -100,6 +100,9 @@ type Job struct {
 	// EffectiveLimits is the resolved Resource_Limits the runner enforces.
 	EffectiveLimits Limits
 
+	// CompileLimits is the resolved Resource_Limits the compile step enforces.
+	CompileLimits Limits
+
 	// Source is the raw UTF-8 source bytes the runner writes to
 	// SourceFilename inside the workspace. Wave C added this field; the
 	// argv builder does not read it.

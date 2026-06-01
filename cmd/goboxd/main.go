@@ -97,6 +97,40 @@ func run() error {
 
 	reg, err := registry.Load(cfg.LanguageRegistryPath)
 	if err != nil {
+		// Inspect for unsafe_filename and unknown_placeholder to log them and increment metrics (REQ-21.2, REQ-22.4)
+		var le *registry.LoadError
+		if errors.As(err, &le) {
+			if le.Reason == "unsafe_filename" {
+				mc.IncUnsafeFilename("registry_load")
+				var fe *security.FilenameError
+				if errors.As(le.Err, &fe) {
+					val := fe.Value
+					if security.HasControlBytes(val) {
+						val = fmt.Sprintf("length=%d", len(fe.Value))
+					}
+					log.Error("unsafe_filename",
+						"event", "unsafe_filename",
+						"field", le.Field,
+						"language_id", le.LanguageID,
+						"value", val,
+						"reason", fe.Reason,
+					)
+				}
+			} else if le.Reason == "unknown_placeholder" {
+				mc.IncUnknownPlaceholder("registry_load")
+				var pe *security.PlaceholderError
+				if errors.As(le.Err, &pe) {
+					log.Error("unknown_placeholder",
+						"event", "unknown_placeholder",
+						"language_id", le.LanguageID,
+						"args_entry", pe.ArgsEntry,
+						"placeholder", pe.Placeholder,
+						"reason", "unknown_placeholder",
+					)
+				}
+			}
+		}
+
 		log.Error("registry_load_failed",
 			"event", "registry_load_failed",
 			"path", cfg.LanguageRegistryPath,

@@ -22,6 +22,7 @@ package metrics
 
 import (
 	"net/http"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -76,7 +77,8 @@ var runDurationBuckets = []float64{
 // Construction is the only way to register the metrics; tests build a
 // fresh *Collector per case to keep counters deterministic.
 type Collector struct {
-	registry *prometheus.Registry
+	registry   prometheus.Gatherer
+	registerer prometheus.Registerer
 
 	buildInfo *prometheus.GaugeVec
 
@@ -92,18 +94,23 @@ type Collector struct {
 	workspaceIsolationViolations prometheus.Counter
 	startupPrereqFailures        *prometheus.CounterVec
 	orphanWorkspaceReaped        prometheus.Counter
+	unsafeFilename               *prometheus.CounterVec
+	unknownPlaceholder           *prometheus.CounterVec
+
+	fallbackDroppedMetrics int64
 }
 
-// New constructs a Collector and registers every Phase 1 metric.
-//
-// service and version are stamped onto the goboxd_build_info gauge as
-// label values; the gauge itself always carries value 1 and exists solely
-// so dashboards can pivot on the running service+version.
+// New constructs a Collector and registers every Phase 1/3 metric.
 func New(service, version string) *Collector {
 	r := prometheus.NewRegistry()
+	return NewWithRegisterer(service, version, r, r)
+}
 
+// NewWithRegisterer constructs a Collector with a custom prometheus.Registerer.
+func NewWithRegisterer(service, version string, r prometheus.Registerer, g prometheus.Gatherer) *Collector {
 	c := &Collector{
-		registry: r,
+		registry:   g,
+		registerer: r,
 		buildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "goboxd_build_info",
 			Help: "Static build information; value is always 1.",
@@ -149,66 +156,129 @@ func New(service, version string) *Collector {
 			Name: "goboxd_orphan_workspace_reaped_total",
 			Help: "Count of stale orphan sandbox directories reaped.",
 		}),
+		unsafeFilename: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "goboxd_unsafe_filename_total",
+			Help: "Count of unsafe filename events, partitioned by source.",
+		}, []string{"source"}),
+		unknownPlaceholder: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "goboxd_unknown_placeholder_total",
+			Help: "Count of unknown placeholder events, partitioned by source.",
+		}, []string{"source"}),
 	}
 
-	r.MustRegister(
-		c.buildInfo, c.droppedLogs, c.droppedMetrics, c.securityRejections,
-		c.runRequests, c.runDuration, c.queueDepth,
-		c.sandboxCleanupFailures, c.workspaceIsolationViolations,
-		c.startupPrereqFailures, c.orphanWorkspaceReaped,
-	)
+	// Register droppedMetrics first so we can track subsequent registration errors.
+	if err := r.Register(c.droppedMetrics); err != nil {
+		c.nullify("droppedMetrics")
+	}
 
-	// Initialise the build-info gauge so it appears on /metrics from
-	// startup, not only after the first request.
-	c.buildInfo.WithLabelValues(service, version).Set(1)
+	for _, metric := range []struct {
+		m    prometheus.Collector
+		name string
+	}{
+		{c.buildInfo, "buildInfo"},
+		{c.droppedLogs, "droppedLogs"},
+		{c.securityRejections, "securityRejections"},
+		{c.runRequests, "runRequests"},
+		{c.runDuration, "runDuration"},
+		{c.queueDepth, "queueDepth"},
+		{c.sandboxCleanupFailures, "sandboxCleanupFailures"},
+		{c.workspaceIsolationViolations, "workspaceIsolationViolations"},
+		{c.startupPrereqFailures, "startupPrereqFailures"},
+		{c.orphanWorkspaceReaped, "orphanWorkspaceReaped"},
+		{c.unsafeFilename, "unsafeFilename"},
+		{c.unknownPlaceholder, "unknownPlaceholder"},
+	} {
+		if err := r.Register(metric.m); err != nil {
+			c.IncDroppedMetric(ReasonMetricRecordFailed)
+			c.nullify(metric.name)
+		}
+	}
+
+	// Initialise the build-info gauge if it was successfully registered.
+	if c.buildInfo != nil {
+		c.buildInfo.WithLabelValues(service, version).Set(1)
+	}
 
 	return c
 }
 
-// Registry returns the underlying *prometheus.Registry.
-//
-// Used by tests that want to gather and inspect metric families directly
-// without going through the HTTP exposition path.
-func (c *Collector) Registry() *prometheus.Registry { return c.registry }
+func (c *Collector) nullify(name string) {
+	switch name {
+	case "buildInfo":
+		c.buildInfo = nil
+	case "droppedLogs":
+		c.droppedLogs = nil
+	case "droppedMetrics":
+		c.droppedMetrics = nil
+	case "securityRejections":
+		c.securityRejections = nil
+	case "runRequests":
+		c.runRequests = nil
+	case "runDuration":
+		c.runDuration = nil
+	case "queueDepth":
+		c.queueDepth = nil
+	case "sandboxCleanupFailures":
+		c.sandboxCleanupFailures = nil
+	case "workspaceIsolationViolations":
+		c.workspaceIsolationViolations = nil
+	case "startupPrereqFailures":
+		c.startupPrereqFailures = nil
+	case "orphanWorkspaceReaped":
+		c.orphanWorkspaceReaped = nil
+	case "unsafeFilename":
+		c.unsafeFilename = nil
+	case "unknownPlaceholder":
+		c.unknownPlaceholder = nil
+	}
+}
+
+// Registry returns the underlying *prometheus.Registry if it matches that type.
+func (c *Collector) Registry() *prometheus.Registry {
+	if r, ok := c.registry.(*prometheus.Registry); ok {
+		return r
+	}
+	return nil
+}
 
 // Handler returns an http.Handler that exposes the registry as Prometheus
 // text format (`Content-Type: text/plain; version=0.0.4`) at GET /metrics.
-//
-// promhttp.HandlerFor honours OpenMetrics negotiation by default; we leave
-// that on because the architecture spec §14 only requires a Prometheus
-// text exposition and does not forbid OpenMetrics for clients that ask
-// for it.
 func (c *Collector) Handler() http.Handler {
-	return promhttp.HandlerFor(c.registry, promhttp.HandlerOpts{
-		Registry: c.registry,
-	})
+	opts := promhttp.HandlerOpts{}
+	if c.registerer != nil {
+		opts.Registry = c.registerer
+	}
+	return promhttp.HandlerFor(c.registry, opts)
 }
 
 // IncDroppedLog increments goboxd_dropped_logs_total{reason}.
-//
-// reason should be one of the documented constants
-// (ReasonLogSerializationFailed, ReasonLogSinkUnavailable). Unknown
-// reasons are accepted as label values; the architecture spec's allowed
-// label set is non-exhaustive ("e.g.").
 func (c *Collector) IncDroppedLog(reason string) {
+	if c == nil || c.droppedLogs == nil {
+		return
+	}
 	c.droppedLogs.WithLabelValues(reason).Inc()
 }
 
 // IncDroppedMetric increments goboxd_dropped_metrics_total{reason}.
-//
-// reason should be one of the documented constants
-// (ReasonMetricRegistryUnavailable, ReasonMetricRecordFailed).
 func (c *Collector) IncDroppedMetric(reason string) {
-	c.droppedMetrics.WithLabelValues(reason).Inc()
+	if c == nil {
+		return
+	}
+	atomic.AddInt64(&c.fallbackDroppedMetrics, 1)
+	if c.droppedMetrics != nil {
+		c.droppedMetrics.WithLabelValues(reason).Inc()
+	}
+}
+
+// DroppedMetricsCount returns the fallback count of dropped metrics.
+func (c *Collector) DroppedMetricsCount() int64 {
+	if c == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&c.fallbackDroppedMetrics)
 }
 
 // IncSecurityRejection increments goboxd_security_rejections_total{rule}.
-//
-// rule should be one of the documented Rule* constants. Recording is
-// best-effort: if the underlying registry is nil (only possible when
-// Collector is constructed in a degraded-stub mode, currently not used)
-// the call is a no-op so observer-failure isolation (Property 25)
-// holds for the originating request.
 func (c *Collector) IncSecurityRejection(rule string) {
 	if c == nil || c.securityRejections == nil {
 		return
@@ -217,9 +287,6 @@ func (c *Collector) IncSecurityRejection(rule string) {
 }
 
 // IncRunRequest increments goboxd_run_requests_total{language,status}.
-//
-// status SHOULD be one of the Status* constants; unknown values are
-// accepted but produce a label cardinality the operator must inspect.
 func (c *Collector) IncRunRequest(language, status string) {
 	if c == nil || c.runRequests == nil {
 		return
@@ -228,9 +295,6 @@ func (c *Collector) IncRunRequest(language, status string) {
 }
 
 // ObserveRunDuration records seconds onto goboxd_run_duration_seconds.
-//
-// Negative values are clamped to 0 so the histogram never sees an
-// out-of-bound observation.
 func (c *Collector) ObserveRunDuration(seconds float64) {
 	if c == nil || c.runDuration == nil {
 		return
@@ -242,8 +306,6 @@ func (c *Collector) ObserveRunDuration(seconds float64) {
 }
 
 // SetQueueDepth sets goboxd_worker_pool_queue_depth to depth.
-//
-// Negative values are clamped to 0.
 func (c *Collector) SetQueueDepth(depth int) {
 	if c == nil || c.queueDepth == nil {
 		return
@@ -285,4 +347,20 @@ func (c *Collector) IncOrphanWorkspaceReaped() {
 		return
 	}
 	c.orphanWorkspaceReaped.Inc()
+}
+
+// IncUnsafeFilename increments goboxd_unsafe_filename_total{source}.
+func (c *Collector) IncUnsafeFilename(source string) {
+	if c == nil || c.unsafeFilename == nil {
+		return
+	}
+	c.unsafeFilename.WithLabelValues(source).Inc()
+}
+
+// IncUnknownPlaceholder increments goboxd_unknown_placeholder_total{source}.
+func (c *Collector) IncUnknownPlaceholder(source string) {
+	if c == nil || c.unknownPlaceholder == nil {
+		return
+	}
+	c.unknownPlaceholder.WithLabelValues(source).Inc()
 }

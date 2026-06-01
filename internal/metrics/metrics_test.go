@@ -354,3 +354,119 @@ func TestOrphanWorkspaceReapedCounterNilSafe(t *testing.T) {
 	var c *metrics.Collector
 	c.IncOrphanWorkspaceReaped()
 }
+
+// TestUnsafeFilenameCounter asserts registration and increment logic of unsafe filename counter.
+func TestUnsafeFilenameCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncUnsafeFilename("registry_load")
+	c.IncUnsafeFilename("runtime_validation")
+	c.IncUnsafeFilename("runtime_validation")
+
+	families := gather(t, c)
+	uf, ok := families["goboxd_unsafe_filename_total"]
+	if !ok {
+		t.Fatal("goboxd_unsafe_filename_total missing")
+	}
+
+	mLoad := findMetric(uf, map[string]string{"source": "registry_load"})
+	if mLoad == nil || mLoad.GetCounter().GetValue() != 1 {
+		t.Errorf("expected registry_load counter to be 1, got %v", mLoad)
+	}
+
+	mRuntime := findMetric(uf, map[string]string{"source": "runtime_validation"})
+	if mRuntime == nil || mRuntime.GetCounter().GetValue() != 2 {
+		t.Errorf("expected runtime_validation counter to be 2, got %v", mRuntime)
+	}
+}
+
+// TestUnknownPlaceholderCounter asserts registration and increment logic of unknown placeholder counter.
+func TestUnknownPlaceholderCounter(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	c.IncUnknownPlaceholder("registry_load")
+	c.IncUnknownPlaceholder("runtime_validation")
+	c.IncUnknownPlaceholder("runtime_validation")
+
+	families := gather(t, c)
+	up, ok := families["goboxd_unknown_placeholder_total"]
+	if !ok {
+		t.Fatal("goboxd_unknown_placeholder_total missing")
+	}
+
+	mLoad := findMetric(up, map[string]string{"source": "registry_load"})
+	if mLoad == nil || mLoad.GetCounter().GetValue() != 1 {
+		t.Errorf("expected registry_load counter to be 1, got %v", mLoad)
+	}
+
+	mRuntime := findMetric(up, map[string]string{"source": "runtime_validation"})
+	if mRuntime == nil || mRuntime.GetCounter().GetValue() != 2 {
+		t.Errorf("expected runtime_validation counter to be 2, got %v", mRuntime)
+	}
+}
+
+// TestRunDurationHistogramBucketsProperty29 asserts that every recorded duration
+// falls into exactly one of the documented buckets by checking cumulative boundary increments.
+func TestRunDurationHistogramBucketsProperty29(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+	
+	// Record a duration of 0.2 seconds.
+	c.ObserveRunDuration(0.2)
+
+	families := gather(t, c)
+	h, ok := families["goboxd_run_duration_seconds"]
+	if !ok {
+		t.Fatal("goboxd_run_duration_seconds missing")
+	}
+	hist := h.GetMetric()[0].GetHistogram()
+
+	// Documented buckets: 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60
+	// 0.2 seconds should fall into the 0.25 bucket and all subsequent buckets,
+	// but NOT into 0.1 or smaller buckets.
+	expectedCumulative := map[float64]uint64{
+		0.01:  0,
+		0.025: 0,
+		0.05:  0,
+		0.1:   0,
+		0.25:  1,
+		0.5:   1,
+		1.0:   1,
+		2.5:   1,
+		5.0:   1,
+		10.0:  1,
+		30.0:  1,
+		60.0:  1,
+	}
+
+	for _, b := range hist.GetBucket() {
+		limit := b.GetUpperBound()
+		want, ok := expectedCumulative[limit]
+		if !ok {
+			t.Errorf("unexpected bucket bound %v", limit)
+			continue
+		}
+		if got := b.GetCumulativeCount(); got != want {
+			t.Errorf("bucket %v cumulative count = %d, want %d", limit, got, want)
+		}
+	}
+}
+
+// TestQueueDepthGaugeProperty30 asserts that pool queue depth gauge updates
+// correctly represent depth changes.
+func TestQueueDepthGaugeProperty30(t *testing.T) {
+	c := metrics.New("goboxd", "dev")
+
+	// Simulate enqueuing and dequeuing events
+	c.SetQueueDepth(1)
+	c.SetQueueDepth(2)
+	c.SetQueueDepth(1)
+	c.SetQueueDepth(0)
+
+	families := gather(t, c)
+	g, ok := families["goboxd_worker_pool_queue_depth"]
+	if !ok {
+		t.Fatal("goboxd_worker_pool_queue_depth missing")
+	}
+	v := g.GetMetric()[0].GetGauge().GetValue()
+	if v != 0 {
+		t.Errorf("expected final queue depth to be 0, got %v", v)
+	}
+}

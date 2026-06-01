@@ -78,6 +78,13 @@ func TestRunCompileThenRun(t *testing.T) {
 	job.LanguageID = "cpp"
 	job.SourceFilename = "main.cpp"
 	job.BinaryFilename = "main"
+	job.CompileLimits = runner.Limits{
+		WallTimeS:    20,
+		CPUTimeS:     20,
+		MemoryMB:     512,
+		ProcessCount: 32,
+		OutputSizeMB: 16,
+	}
 	job.CompileTemplate = runner.CommandTemplate{
 		Command: "/usr/bin/g++",
 		Args:    []string{"-O2", "-o", "{{BINARY_FILENAME}}", "{{SOURCE_FILENAME}}"},
@@ -111,6 +118,13 @@ func TestRunCompileFailureSkipsRun(t *testing.T) {
 	job := validJobPy3()
 	job.SourceFilename = "main.cpp"
 	job.BinaryFilename = "main"
+	job.CompileLimits = runner.Limits{
+		WallTimeS:    20,
+		CPUTimeS:     20,
+		MemoryMB:     512,
+		ProcessCount: 32,
+		OutputSizeMB: 16,
+	}
 	job.CompileTemplate = runner.CommandTemplate{
 		Command: "/usr/bin/g++",
 		Args:    []string{"-o", "{{BINARY_FILENAME}}", "{{SOURCE_FILENAME}}"},

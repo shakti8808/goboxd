@@ -201,7 +201,7 @@ func (r *SandboxRunner) Run(ctx context.Context, job Job, stdin []byte) (result 
 	// orchestrator skips it transparently when the template is empty.
 	start := r.cfg.Now()
 	if job.CompileTemplate.Command != "" {
-		compileResult, compileErr := r.runStep(ctx, StepCompile, job.CompileTemplate, job, stdin, ws.RequestID())
+		compileResult, compileErr := r.runStep(ctx, StepCompile, job.CompileTemplate, job, job.CompileLimits, stdin, ws.RequestID())
 		if compileErr != nil {
 			return ExecutionResult{Status: StatusInternalError, DurationMS: r.elapsedMS(start)}, compileErr
 		}
@@ -213,7 +213,7 @@ func (r *SandboxRunner) Run(ctx context.Context, job Job, stdin []byte) (result 
 
 	// Run step is mandatory. The runStep helper composes argv builder,
 	// launcher, capture, and classifier.
-	runResult, runStepErr := r.runStep(ctx, StepRun, job.RunTemplate, job, stdin, ws.RequestID())
+	runResult, runStepErr := r.runStep(ctx, StepRun, job.RunTemplate, job, job.EffectiveLimits, stdin, ws.RequestID())
 	if runStepErr != nil {
 		return ExecutionResult{Status: StatusInternalError, DurationMS: r.elapsedMS(start)}, runStepErr
 	}
@@ -225,7 +225,7 @@ func (r *SandboxRunner) Run(ctx context.Context, job Job, stdin []byte) (result 
 // invocation. It is shared between the compile and run steps so the
 // argv-builder + launcher + capture + classifier composition is
 // asserted at one site.
-func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandTemplate, job Job, _ []byte, reqID uuid.UUID) (ExecutionResult, error) {
+func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandTemplate, job Job, limits Limits, _ []byte, reqID uuid.UUID) (ExecutionResult, error) {
 	argvIn := ArgvInput{
 		NsJailPath:      r.cfg.NsJailPath,
 		Step:            step,
@@ -236,6 +236,7 @@ func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandT
 		SeccompPolicy:   r.cfg.SeccompPolicy,
 		SandboxGuestDir: r.cfg.SandboxGuestDir,
 	}
+	argvIn.Job.EffectiveLimits = limits
 	argv, err := BuildArgv(argvIn)
 	if err != nil {
 		return ExecutionResult{Status: StatusInternalError}, err

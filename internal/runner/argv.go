@@ -312,6 +312,7 @@ func expandPlaceholders(arg string, job Job) (string, error) {
 			return "", &ArgvError{
 				Reason: "unterminated_placeholder",
 				Detail: fmt.Sprintf("entry %q contains unterminated placeholder", arg),
+				Cause:  &security.PlaceholderError{ArgsEntry: arg, Placeholder: rest[open:]},
 			}
 		}
 		name := rest[open+2 : open+2+close]
@@ -320,6 +321,7 @@ func expandPlaceholders(arg string, job Job) (string, error) {
 			return "", &ArgvError{
 				Reason: "unknown_placeholder",
 				Detail: fmt.Sprintf("entry %q contains placeholder %q (not in allowlist)", arg, name),
+				Cause:  &security.PlaceholderError{ArgsEntry: arg, Placeholder: name},
 			}
 		}
 		b.WriteString(value)

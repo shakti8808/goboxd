@@ -93,6 +93,8 @@ type RunMetrics interface {
 	IncRunRequest(language, status string)
 	ObserveRunDuration(seconds float64)
 	IncSecurityRejection(rule string)
+	IncUnsafeFilename(source string)
+	IncUnknownPlaceholder(source string)
 }
 
 // errInvalidDeps is returned by NewFullRunHandler when the supplied
@@ -126,12 +128,14 @@ func NewFullRunHandler(deps RunDeps) (*FullRunHandler, error) {
 }
 
 // nopRunMetrics is the default RunMetrics; all methods are no-ops so
-// the handler works without metrics wired.
+// handlers don't need to check for nil.
 type nopRunMetrics struct{}
 
 func (nopRunMetrics) IncRunRequest(string, string)    {}
 func (nopRunMetrics) ObserveRunDuration(float64)      {}
 func (nopRunMetrics) IncSecurityRejection(string)     {}
+func (nopRunMetrics) IncUnsafeFilename(string)        {}
+func (nopRunMetrics) IncUnknownPlaceholder(string)    {}
 
 // codeSubmission is the JSON wire shape from architecture §"Data Models".
 //
@@ -294,6 +298,48 @@ func (h *FullRunHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // JSON response and updates metrics/log observers.
 func (h *FullRunHandler) writeOutcome(w http.ResponseWriter, language string, out worker.Outcome, start time.Time, requestID string) {
 	if out.Err != nil {
+		// Inspect for runner validation errors to increment specific metrics and log details
+		var argvErr *runner.ArgvError
+		if errors.As(out.Err, &argvErr) {
+			if argvErr.Reason == "unsafe_filename" {
+				h.deps.Metrics.IncUnsafeFilename("runtime_validation")
+				var fe *security.FilenameError
+				if errors.As(argvErr.Cause, &fe) {
+					val := fe.Value
+					if security.HasControlBytes(val) {
+						val = fmt.Sprintf("length=%d", len(fe.Value))
+					}
+					fieldName := "source_filename"
+					if strings.Contains(argvErr.Detail, "BinaryFilename") {
+						fieldName = "binary_filename"
+					} else if strings.Contains(argvErr.Detail, "StdinFile") {
+						fieldName = "stdin_file"
+					}
+					h.deps.Logger.Error("unsafe_filename",
+						"event", "unsafe_filename",
+						"field", fieldName,
+						"language_id", language,
+						"value", val,
+						"reason", fe.Reason,
+						"request_id", requestID,
+					)
+				}
+			} else if argvErr.Reason == "unknown_placeholder" || argvErr.Reason == "unterminated_placeholder" {
+				h.deps.Metrics.IncUnknownPlaceholder("runtime_validation")
+				var pe *security.PlaceholderError
+				if errors.As(argvErr.Cause, &pe) {
+					h.deps.Logger.Error("unknown_placeholder",
+						"event", "unknown_placeholder",
+						"language_id", language,
+						"args_entry", pe.ArgsEntry,
+						"placeholder", pe.Placeholder,
+						"reason", "unknown_placeholder",
+						"request_id", requestID,
+					)
+				}
+			}
+		}
+
 		// Err is reserved for "the runner could not produce a
 		// classified result at all" (e.g. workspace allocation
 		// failed). Surface as INTERNAL_ERROR with empty stdout/stderr.
@@ -478,6 +524,13 @@ func buildRunnerJob(def registry.Definition, sub security.Submission, cs codeSub
 		job.CompileTemplate = runner.CommandTemplate{
 			Command: def.Compile.Command,
 			Args:    def.Compile.Args,
+		}
+		job.CompileLimits = runner.Limits{
+			WallTimeS:    def.Compile.Limits.WallTimeS,
+			CPUTimeS:     def.Compile.Limits.CPUTimeS,
+			MemoryMB:     def.Compile.Limits.MemoryMB,
+			ProcessCount: def.Compile.Limits.ProcessCount,
+			OutputSizeMB: def.Compile.Limits.OutputSizeMB,
 		}
 	}
 	if sub.PresentStdin {

@@ -111,6 +111,8 @@ func (m *recordingMetrics) IncSecurityRejection(rule string) {
 	defer m.mu.Unlock()
 	m.rejections = append(m.rejections, rule)
 }
+func (m *recordingMetrics) IncUnsafeFilename(source string)     {}
+func (m *recordingMetrics) IncUnknownPlaceholder(source string) {}
 
 // newHandler builds a FullRunHandler with sensible Wave D defaults
 // and the supplied stubs.
