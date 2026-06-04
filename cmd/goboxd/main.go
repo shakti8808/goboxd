@@ -169,7 +169,9 @@ func run() error {
 		SeccompPolicy:           cfg.SeccompPolicy,
 		LaunchTimeout:           5 * time.Second, // Hardcoded 5s per REQ-10.7
 		BindMounts:              runnerMounts,
-		EnvAllowlist:            nil,
+		EnvAllowlist: []runner.EnvVar{
+			{Name: "PATH", Value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		},
 		StdoutCaptureLimitBytes: cfg.StdoutCaptureLimitBytes,
 		StderrCaptureLimitBytes: cfg.StderrCaptureLimitBytes,
 		Observer:                sandboxObserver{logger: log, metrics: mc},

@@ -3,6 +3,7 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -160,8 +161,6 @@ func BuildArgv(in ArgvInput) ([]string, error) {
 	argv := []string{
 		in.NsJailPath,
 		"--mode", "o",
-		"--quiet",
-		"--really_quiet",
 		"--user", strconv.Itoa(user),
 		"--group", strconv.Itoa(group),
 		"--hostname", "goboxd-sandbox",
@@ -207,9 +206,7 @@ func BuildArgv(in ArgvInput) ([]string, error) {
 	// Seccomp policy.
 	argv = append(argv, "--seccomp_string", in.SeccompPolicy)
 
-	// nsjail's own log goes to /dev/null; the runner separately captures
-	// the child's stderr.
-	argv = append(argv, "--log", "/dev/null")
+	argv = append(argv, "--log", filepath.Join(in.Job.JobDir, "nsjail.log"))
 
 	// End of nsjail flags; child argv follows.
 	argv = append(argv, "--")

@@ -27,7 +27,7 @@ func TestMetricsScrapeConsistency(t *testing.T) {
 	env := map[string]string{
 		"SANDBOX_ROOT_DIR":      sandboxDir,
 		"LOG_LEVEL":             "DEBUG",
-		"MAX_SOURCE_SIZE_BYTES": "30",
+		"MAX_SOURCE_SIZE_BYTES": "80",
 	}
 
 	srv := startServer(t, env)
@@ -83,10 +83,10 @@ func TestMetricsScrapeConsistency(t *testing.T) {
 	}
 	sendRunRequestExpectRejection(t, client, srv.URL, unregisteredPayload, "language_not_registered")
 
-	// D3. source_size_exceeded (exceeding MAX_SOURCE_SIZE_BYTES=30)
+	// D3. source_size_exceeded (exceeding MAX_SOURCE_SIZE_BYTES=80)
 	sourceSizePayload := map[string]any{
 		"language": "py3",
-		"source":   "print('this source code is 31 bytes!')",
+		"source":   "print('this source code is over 80 bytes! padding padding padding padding padding padding')",
 	}
 	sendRunRequestExpectRejection(t, client, srv.URL, sourceSizePayload, "source_size_exceeded")
 

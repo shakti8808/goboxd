@@ -25,7 +25,7 @@ func TestQueueFullRejection(t *testing.T) {
 
 	payload := map[string]any{
 		"language": "py3",
-		"source":   "print('blocking')",
+		"source":   "import time\ntime.sleep(2)",
 	}
 	body, _ := json.Marshal(payload)
 

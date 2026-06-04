@@ -31,9 +31,17 @@ const (
 	defaultLanguageRegistryPath    = "/etc/goboxd/language_registry.yaml"
 	defaultNsJailPath              = "/usr/local/bin/nsjail"
 	defaultSandboxRoot             = "/var/lib/goboxd/sandbox"
-	defaultSeccompPolicy           = "default"
+	defaultSeccompPolicy = `DEFAULT ERRNO(1)
+ALLOW {
+	execve, brk, mmap, faccessat, openat, newfstatat, close, read, munmap, mprotect,
+	getdents64, rt_sigaction, lseek, ioctl, write, fcntl, getrandom, futex, gettid,
+	getuid, geteuid, getgid, getegid, readlinkat, set_tid_address, set_robust_list,
+	sysinfo, prlimit64, wait4, clone, unlinkat, pipe2, getrusage,
+	fchmodat, umask, getcwd, exit, exit_group, tgkill, nanosleep, clock_nanosleep,
+	SYSCALL[190], SYSCALL[293], SYSCALL[439]
+}`
 	defaultSandboxOrphanTTLS       = 600
-	defaultSandboxRoMounts         = "/usr:/usr,/lib:/lib,/lib64:/lib64,/bin:/bin,/etc/alternatives:/etc/alternatives"
+	defaultSandboxRoMounts         = "/usr:/usr,/lib:/lib,/bin:/bin,/etc/alternatives:/etc/alternatives"
 	defaultSandboxRootDirPermsMax  = 0775
 )
 

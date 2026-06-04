@@ -227,13 +227,22 @@ func TestLoadDefaultsForNewKeys(t *testing.T) {
 	if cfg.SandboxRoot != "/var/lib/goboxd/sandbox" {
 		t.Errorf("SandboxRoot default = %q", cfg.SandboxRoot)
 	}
-	if cfg.SeccompPolicy != "default" {
+	expectedPolicy := `DEFAULT ERRNO(1)
+ALLOW {
+	execve, brk, mmap, faccessat, openat, newfstatat, close, read, munmap, mprotect,
+	getdents64, rt_sigaction, lseek, ioctl, write, fcntl, getrandom, futex, gettid,
+	getuid, geteuid, getgid, getegid, readlinkat, set_tid_address, set_robust_list,
+	sysinfo, prlimit64, wait4, clone, unlinkat, pipe2, getrusage,
+	fchmodat, umask, getcwd, exit, exit_group, tgkill, nanosleep, clock_nanosleep,
+	SYSCALL[190], SYSCALL[293], SYSCALL[439]
+}`
+	if cfg.SeccompPolicy != expectedPolicy {
 		t.Errorf("SeccompPolicy default = %q", cfg.SeccompPolicy)
 	}
 	if cfg.SandboxOrphanTTL != 600*time.Second {
 		t.Errorf("SandboxOrphanTTL default = %v", cfg.SandboxOrphanTTL)
 	}
-	if len(cfg.SandboxRoMounts) != 5 {
-		t.Errorf("SandboxRoMounts length = %d, want 5", len(cfg.SandboxRoMounts))
+	if len(cfg.SandboxRoMounts) != 4 {
+		t.Errorf("SandboxRoMounts length = %d, want 4", len(cfg.SandboxRoMounts))
 	}
 }

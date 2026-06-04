@@ -49,7 +49,7 @@ func TestPy3Hello(t *testing.T) {
 	}
 
 	if res["status"] != "OK" {
-		t.Errorf("expected status OK, got %v", res["status"])
+		t.Errorf("expected status OK, got %v, res: %+v", res["status"], res)
 	}
 	if res["stdout"] != "hi\n" {
 		t.Errorf("expected stdout 'hi\n', got %q", res["stdout"])

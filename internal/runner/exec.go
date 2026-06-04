@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -185,7 +186,18 @@ func (defaultExecLauncher) Launch(ctx context.Context, req ExecRequest) (ExecOut
 				// failures to RUNTIME_ERROR rather than OK.
 				res.TerminatedBySignal = true
 			}
-			res.LimitIndicator = parseNsjailLimit(stderrTee.String())
+			
+			var logStr string
+			for i, arg := range req.Argv {
+				if arg == "--log" && i+1 < len(req.Argv) {
+					if content, err := os.ReadFile(req.Argv[i+1]); err == nil {
+						logStr = string(content)
+					}
+					break
+				}
+			}
+
+			res.LimitIndicator = parseNsjailLimit(stderrTee.String() + "\n" + logStr)
 			return res
 		},
 	}
@@ -214,8 +226,7 @@ func parseNsjailLimit(stderr string) LimitIndicator {
 		strings.Contains(s, "rlimit_cpu"):
 		return LimitIndicatorCPU
 	case strings.Contains(s, "time >="),
-		strings.Contains(s, "wall time"),
-		strings.Contains(s, "time_limit"):
+		strings.Contains(s, "wall time"):
 		return LimitIndicatorWall
 	default:
 		return LimitIndicatorNone

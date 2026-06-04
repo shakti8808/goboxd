@@ -225,7 +225,7 @@ func (r *SandboxRunner) Run(ctx context.Context, job Job, stdin []byte) (result 
 // invocation. It is shared between the compile and run steps so the
 // argv-builder + launcher + capture + classifier composition is
 // asserted at one site.
-func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandTemplate, job Job, limits Limits, _ []byte, reqID uuid.UUID) (ExecutionResult, error) {
+func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandTemplate, job Job, limits Limits, stdin []byte, reqID uuid.UUID) (ExecutionResult, error) {
 	argvIn := ArgvInput{
 		NsJailPath:      r.cfg.NsJailPath,
 		Step:            step,
@@ -251,7 +251,7 @@ func (r *SandboxRunner) runStep(ctx context.Context, step StepKind, tpl CommandT
 		// definition prefers that pattern.
 		// We pass an empty slice to the launcher because the file is
 		// the canonical channel; surfacing both would risk double-feed.
-		stdinBytes = nil
+		stdinBytes = stdin
 	}
 
 	outcome, err := r.cfg.Exec.Launch(ctx, ExecRequest{
